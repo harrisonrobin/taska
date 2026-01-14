@@ -181,7 +181,6 @@ func main() {
 			Deadline:    deadline,
 			Scheduled:   scheduled,
 			Status:      twT.Status,
-			Source:      "taskwarrior",
 			Project:     twT.Project,
 			Tags:        twT.Tags,
 			Start:       start,

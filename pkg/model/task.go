@@ -11,7 +11,6 @@ type Task struct {
 	Tags        []string
 	Priority    string
 	Status      string
-	Source      string // "taskwarrior" or "orgmode"
 	Project     string
 	Annotations []string
 	// Accounting & Time-Shift

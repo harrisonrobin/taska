@@ -15,7 +15,6 @@ func TestConvertTaskToCalendarEvent(t *testing.T) {
 		Description: "Test Task",
 		Status:      "pending",
 		Deadline:    deadline,
-		Source:      "taskwarrior",
 		Project:     "Work",
 		Tags:        []string{"buy", "food"},
 		Annotations: []string{"Note 1"},
