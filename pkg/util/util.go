@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clobrano/TaskwarriorAgenda/pkg/model"
+	"github.com/harrisonrobin/taska/pkg/colors"
+	"github.com/harrisonrobin/taska/pkg/model"
 	"google.golang.org/api/calendar/v3"
 )
 
@@ -69,41 +70,129 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 		return nil, fmt.Errorf("could not convert nil Task")
 	}
 
-	if task.Deadline.IsZero() {
-		return nil, fmt.Errorf("could not sync Task without due date: task id %s\n", task.ID)
+	// 1. Title/Summary Logic
+	prefix := "‣"
+	if task.Status == "completed" {
+		prefix = "✓"
+	}
+	// TODO: Check overdue for "!" prefix
+	eventSummary := fmt.Sprintf("%s %s", prefix, task.Description)
+
+	// 2. Color Logic
+	// We need to instantiate ColorCache. Since this function is pure utility, we might need to pass cache or instantiate it here.
+	// Instantiating here for now as user requested refactor. Best practice would be dependency injection but let's keep it simple.
+	colorID := "14" // Default gray
+	cache, err := colors.NewColorCache()
+	if err == nil {
+		isActive := task.Status == "pending" || task.Status == "waiting" // broad definition
+		colorID = cache.GetColorID(task.Project, isActive)
+	} else {
+		log.Printf("Warning: could not load color cache: %v", err)
 	}
 
-	var eventSummary string
-	var eventStatus string
+	// 3. Time-Shift Logic
+	var start, end time.Time
 
-	switch task.Status {
-	case "pending":
-		eventSummary = task.Description
-		eventStatus = "confirmed"
-	case "completed":
-		eventSummary = fmt.Sprintf("✅ %s", task.Description)
-		eventStatus = "confirmed"
-	case "deleted":
-		eventSummary = fmt.Sprintf("❌ %s", task.Description)
-		eventStatus = "cancelled"
-	default:
-		eventSummary = task.Description
-		eventStatus = "confirmed"
-	}
-
+	// Default duration if nothing matches
 	defaultDuration := 30 * time.Minute
-	eventDescription := fmt.Sprintf("Source: %s, ID: %s, Status: %s", task.Source, task.ID, task.Status)
+
+	// Logic:
+	// If Done: End = Now (or task.End), Start = End - Estimate/Actual/Duration
+	// If Started: Start = Now (or task.Start), End = Start + Estimate
+	// Fallback: Start = Due, End = Due + Duration
+
+	if task.Status == "completed" {
+		if !task.End.IsZero() {
+			end = task.End
+		} else {
+			end = time.Now()
+		}
+
+		duration := defaultDuration
+		if task.Actual > 0 {
+			duration = task.Actual
+		} else if task.Estimate > 0 {
+			duration = task.Estimate
+		}
+		start = end.Add(-duration)
+	} else if !task.Start.IsZero() {
+		// Started
+		start = task.Start
+		if task.Estimate > 0 {
+			end = start.Add(task.Estimate)
+		} else {
+			end = start.Add(defaultDuration)
+		}
+	} else if !task.Deadline.IsZero() {
+		// Scheduled / Due
+		start = task.Deadline
+		if task.Estimate > 0 {
+			end = start.Add(task.Estimate)
+		} else {
+			end = start.Add(defaultDuration)
+		}
+	} else {
+		// ROI: If no dates, we can't sync it easily.
+		// User req said: "If no Start/End, ignore?"
+		// actually user said "task add Check if +READY". Ready usually implies sched/due or just unblocked.
+		// If no date, GCal requires one. Let's error or skip?
+		// Legacy behavior was error.
+		return nil, fmt.Errorf("task has no date usage (due, start, or end): %s", task.ID)
+	}
+
+	// 4. Description & Accounting
+	var descBuilder strings.Builder
+
+	// Tags Header
+	if len(task.Tags) > 0 {
+		for _, tag := range task.Tags {
+			descBuilder.WriteString(fmt.Sprintf("#%s ", tag))
+		}
+		descBuilder.WriteString("\n\n")
+	}
+
+	// Taskwarrior-y formatting
+	descBuilder.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
+	descBuilder.WriteString(fmt.Sprintf("Project: %s\n", task.Project))
+	descBuilder.WriteString(fmt.Sprintf("UUID: %s\n", task.ID))
+
+	// Accounting Bullets
+	descBuilder.WriteString("\nAccounting:\n")
+	if task.Estimate > 0 {
+		descBuilder.WriteString(fmt.Sprintf("• estimated: %s\n", task.Estimate))
+	}
+	if task.Status == "completed" {
+		// Simple logic: if actual vs estimate logic exists.
+		descBuilder.WriteString("• spent [calculation pending implementation]\n")
+		// TODO: Refine with actual calculation if Act is present
+	} else if !task.Start.IsZero() {
+		// "started late/early" logic requires Scheduled date vs Start date
+		descBuilder.WriteString("• started [check implementation]\n")
+	}
+
+	// Annotations
+	if len(task.Annotations) > 0 {
+		descBuilder.WriteString("\nNotes:\n")
+		for _, ann := range task.Annotations {
+			descBuilder.WriteString(fmt.Sprintf("‣ %s\n", ann))
+		}
+	}
 
 	event := &calendar.Event{
 		Summary: eventSummary,
-		Status:  eventStatus,
+		ColorId: colorID,
 		Start: &calendar.EventDateTime{
-			DateTime: task.Deadline.UTC().Format(time.RFC3339),
+			DateTime: start.UTC().Format(time.RFC3339),
 		},
 		End: &calendar.EventDateTime{
-			DateTime: task.Deadline.UTC().Add(defaultDuration).Format(time.RFC3339),
+			DateTime: end.UTC().Format(time.RFC3339),
 		},
-		Description: eventDescription,
+		Description: descBuilder.String(),
+		ExtendedProperties: &calendar.EventExtendedProperties{
+			Private: map[string]string{
+				"taskwarrior_id": task.ID,
+			},
+		},
 	}
 
 	return event, nil

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/clobrano/TaskwarriorAgenda/pkg/auth"
+	"github.com/harrisonrobin/taska/pkg/auth"
 	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/option"
 )

@@ -33,7 +33,7 @@ const (
 	// to capture the OAuth redirect. Choose a free port.
 	LocalhostAuthPort = "6789"
 
-	xdgAppName = "taskwarrior-agenda"
+	xdgAppName = "taska"
 )
 
 // GetConfig creates an oauth2.Config from the client secrets file and specified scopes.

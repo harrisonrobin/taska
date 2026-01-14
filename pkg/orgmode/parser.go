@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clobrano/TaskwarriorAgenda/pkg/model"
+	"github.com/harrisonrobin/taska/pkg/model"
 )
 
 // parseFile parses an Org-mode file and returns a slice of tasks.

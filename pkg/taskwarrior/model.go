@@ -49,6 +49,22 @@ type Task struct {
 	Due         *CustomTime `json:"due,omitempty"`
 	Scheduled   *CustomTime `json:"scheduled,omitempty"`
 	Status      string      `json:"status"`
-	// Only to update corresponding calendar event
-	EventID string `json:"event_id,omitempty"`
+	Project     string      `json:"project,omitempty"`
+	Tags        []string    `json:"tags,omitempty"`
+	Annotations []struct {
+		Description string      `json:"description"`
+		Entry       *CustomTime `json:"entry"`
+	} `json:"annotations,omitempty"`
+	// Time Tracking & Accounting
+	Start *CustomTime `json:"start,omitempty"`
+	End   *CustomTime `json:"end,omitempty"`
+	// UDA fields are often flat in JSON export, but let's check input.
+	// Taskwarrior exports UDAs as top-level fields like "est" and "act" if configured.
+	// We'll use a specific struct or map for them?
+	// Using mapstructure or manual parsing is safer, but let's add specific known fields if user confirmed labels.
+	// User said: uda.estimate.label=est, uda.actual.label=act
+	Est string `json:"est,omitempty"` // Duration string like "1h"
+	Act string `json:"act,omitempty"` // Duration string like "30m" -- Timewarrior format might differ?
+	// Note: Timewarrior usually doesn't inject INTO the task JSON unless 'hook' does it or it's stored in UDA.
+	// User implies it IS in UDA.
 }

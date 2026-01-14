@@ -3,6 +3,7 @@ package taskwarrior
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 )
 
@@ -28,6 +29,32 @@ func (c *Client) GetTasks(filter []string) ([]Task, error) {
 	var tasks []Task
 	if err := json.Unmarshal(output, &tasks); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal taskwarrior output: %w", err)
+	}
+	return tasks, nil
+}
+
+// ParseTask parses a single task JSON from an io.Reader
+func (c *Client) ParseTask(r io.Reader) (Task, error) {
+	var task Task
+	if err := json.NewDecoder(r).Decode(&task); err != nil {
+		return Task{}, fmt.Errorf("failed to decode task json: %w", err)
+	}
+	return task, nil
+}
+
+// ParseTasks parses multiple JSON objects from an io.Reader (e.g. for hooks that send multiple lines)
+func (c *Client) ParseTasks(r io.Reader) ([]Task, error) {
+	var tasks []Task
+	decoder := json.NewDecoder(r)
+	for {
+		var task Task
+		if err := decoder.Decode(&task); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("failed to decode task json: %w", err)
+		}
+		tasks = append(tasks, task)
 	}
 	return tasks, nil
 }
