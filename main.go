@@ -202,10 +202,8 @@ func main() {
 	if sweepTable != nil {
 		sweptUUIDs := sweepTable.Sweep(time.Now())
 		for _, uuid := range sweptUUIDs {
-			log.Printf("Sweep: task %s has become overdue", uuid)
 			tasks, err := client.GetTasks([]string{uuid})
 			if err != nil || len(tasks) == 0 {
-				log.Printf("Sweep: task %s no longer exists, removing from table", uuid)
 				// It was already removed from the memory table by Sweep(),
 				// and it will be saved to disk by the deferred save.
 				continue
@@ -266,7 +264,6 @@ func main() {
 			return
 		}
 		if event != nil {
-			log.Printf("Deleting event for task %s", taskToSync.ID)
 			err := gClient.DeleteEvent(event.Id)
 			if err != nil {
 				log.Printf("Error deleting event: %v", err)
@@ -277,7 +274,6 @@ func main() {
 		}
 	} else {
 		// Insert / Patch
-		log.Printf("Syncing task: '%s', uuid: %s", taskToSync.Description, taskToSync.ID)
 		_, err := gClient.SyncEvent(*taskToSync)
 		if err != nil {
 			log.Printf("Error syncing event for task %s: %v\n", taskToSync.Description, err)

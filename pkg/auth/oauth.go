@@ -131,7 +131,6 @@ func GetClient(ctx context.Context, scopes []string) (*http.Client, error) {
 		// A more robust check might compare entire token structs, but access token change
 		// is the most common indication of a refresh.
 		if currentTok.AccessToken != tok.AccessToken || currentTok.RefreshToken != tok.RefreshToken {
-			log.Println("Token was refreshed or updated. Saving new token to file.")
 			saveToken(tokenFile, currentTok)
 		}
 	}()
@@ -224,7 +223,6 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 
 // saveToken saves an oauth2.Token to a JSON file.
 func saveToken(path string, token *oauth2.Token) {
-	fmt.Printf("Saving authentication token to: %s\n", path)
 	// Create the directory if it doesn't exist
 	dir := os.Args[0] // Default to current executable directory if no specific path is given
 	if len(path) > 0 && path[len(path)-1] != os.PathSeparator {

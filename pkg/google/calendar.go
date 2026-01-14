@@ -41,15 +41,12 @@ func (c *CalendarClient) SyncEvent(task model.Task) (*calendar.Event, error) {
 			return nil, err
 		}
 		if needsUpdate {
-			log.Printf("Updating event for task: %s", task.Description)
 			// Ensure we preserve the ID when updating
 			return c.srv.Events.Update(c.calendarID, existingEvent.Id, event).Do()
 		}
-		log.Printf("Event for task %s is already up to date", task.Description)
 		return existingEvent, nil
 	}
 
-	log.Printf("Creating new event for task: %s", task.Description)
 	return c.srv.Events.Insert(c.calendarID, event).Do()
 }
 

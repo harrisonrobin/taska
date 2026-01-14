@@ -22,46 +22,28 @@ const (
 // It compares the target event (newly converted) with the existing event from the calendar.
 func EventNeedsUpdate(task *model.Task, existingEvent *calendar.Event, targetEvent *calendar.Event) (bool, string, error) {
 	// Status derived from Summary prefix
-	var existingIsCompleted bool
-	var existingIsDeleted bool
-	var cleanSummary string
-
-	if strings.HasPrefix(existingEvent.Summary, "✅") {
-		existingIsCompleted = true
-		cleanSummary = strings.TrimSpace(strings.TrimPrefix(existingEvent.Summary, "✅"))
-	} else if strings.HasPrefix(existingEvent.Summary, "❌") {
-		existingIsDeleted = true
-		cleanSummary = strings.TrimSpace(strings.TrimPrefix(existingEvent.Summary, "❌"))
-	} else {
-		cleanSummary = existingEvent.Summary
-	}
+	existingIsCompleted := strings.HasPrefix(existingEvent.Summary, "✓")
 
 	// 1. Check for Status Mismatch
 	if task.Status == "completed" && !existingIsCompleted {
 		return true, NEEDS_UPDATE_STATUS, nil
 	}
-	if task.Status == "deleted" && !existingIsDeleted {
-		return true, NEEDS_UPDATE_STATUS, nil
-	}
-	if task.Status == "pending" && (existingIsCompleted || existingIsDeleted) {
+	if task.Status == "pending" && existingIsCompleted {
 		return true, NEEDS_UPDATE_STATUS, nil
 	}
 
-	// 2. Check for Summary/Title Mismatch
-	if task.Description != cleanSummary {
-		log.Printf("Summary mismatch: task='%s', existing='%s'", task.Description, cleanSummary)
+	// 2. Check for Summary/Title Mismatch (including Prefix changes like Overdue '!')
+	if existingEvent.Summary != targetEvent.Summary {
 		return true, NEEDS_UPDATE_DESCRIPTION, nil
 	}
 
 	// 3. Check for Description (Annotations/Notes) Mismatch
 	if existingEvent.Description != targetEvent.Description {
-		log.Printf("Description mismatch (Annotations/Metadata) for task: %s", task.Description)
 		return true, NEEDS_UPDATE_DESCRIPTION, nil
 	}
 
 	// 4. Check for Color Mismatch
 	if existingEvent.ColorId != targetEvent.ColorId {
-		log.Printf("Color mismatch for task: %s", task.Description)
 		return true, "color", nil
 	}
 
@@ -77,7 +59,6 @@ func EventNeedsUpdate(task *model.Task, existingEvent *calendar.Event, targetEve
 	}
 
 	if !existingTime.Equal(targetTime) {
-		log.Printf("Time mismatch: existing=%s, target=%s", existingTime, targetTime)
 		return true, NEEDS_UPDATE_DUE, nil
 	}
 
