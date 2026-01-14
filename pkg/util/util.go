@@ -18,47 +18,66 @@ const (
 	NEEDS_UPDATE_DUE         = "due"
 )
 
-// EventNeedsUpdate returns true if the fields shared between a model.Task and a calendar.Event differ
-func EventNeedsUpdate(task *model.Task, event *calendar.Event) (bool, string, error) {
-	var eventIsCompleted bool
-	var eventIsDeleted bool
+// EventNeedsUpdate returns true if the fields shared between a model.Task and a calendar.Event differ.
+// It compares the target event (newly converted) with the existing event from the calendar.
+func EventNeedsUpdate(task *model.Task, existingEvent *calendar.Event, targetEvent *calendar.Event) (bool, string, error) {
+	// Status derived from Summary prefix
+	var existingIsCompleted bool
+	var existingIsDeleted bool
 	var cleanSummary string
 
-	if strings.HasPrefix(event.Summary, "✅") {
-		eventIsCompleted = true
-		cleanSummary = strings.TrimSpace(strings.TrimPrefix(event.Summary, "✅"))
-	} else if strings.HasPrefix(event.Summary, "❌") {
-		eventIsDeleted = true
-		cleanSummary = strings.TrimSpace(strings.TrimPrefix(event.Summary, "❌"))
+	if strings.HasPrefix(existingEvent.Summary, "✅") {
+		existingIsCompleted = true
+		cleanSummary = strings.TrimSpace(strings.TrimPrefix(existingEvent.Summary, "✅"))
+	} else if strings.HasPrefix(existingEvent.Summary, "❌") {
+		existingIsDeleted = true
+		cleanSummary = strings.TrimSpace(strings.TrimPrefix(existingEvent.Summary, "❌"))
 	} else {
-		cleanSummary = event.Summary
+		cleanSummary = existingEvent.Summary
 	}
 
-	// Check for status mismatches
-	if task.Status == "completed" && !eventIsCompleted {
+	// 1. Check for Status Mismatch
+	if task.Status == "completed" && !existingIsCompleted {
 		return true, NEEDS_UPDATE_STATUS, nil
 	}
-	if task.Status == "deleted" && !eventIsDeleted {
+	if task.Status == "deleted" && !existingIsDeleted {
 		return true, NEEDS_UPDATE_STATUS, nil
 	}
-	if task.Status == "pending" && (eventIsCompleted || eventIsDeleted) {
+	if task.Status == "pending" && (existingIsCompleted || existingIsDeleted) {
 		return true, NEEDS_UPDATE_STATUS, nil
 	}
 
-	// Check for description mismatch
+	// 2. Check for Summary/Title Mismatch
 	if task.Description != cleanSummary {
-		log.Printf("task: '%s', event: '%s' needs update\n", task.Description, cleanSummary)
+		log.Printf("Summary mismatch: task='%s', existing='%s'", task.Description, cleanSummary)
 		return true, NEEDS_UPDATE_DESCRIPTION, nil
 	}
 
-	// Check for due date mismatch
-	eventTime, err := time.Parse(time.RFC3339, event.Start.DateTime)
+	// 3. Check for Description (Annotations/Notes) Mismatch
+	if existingEvent.Description != targetEvent.Description {
+		log.Printf("Description mismatch (Annotations/Metadata) for task: %s", task.Description)
+		return true, NEEDS_UPDATE_DESCRIPTION, nil
+	}
+
+	// 4. Check for Color Mismatch
+	if existingEvent.ColorId != targetEvent.ColorId {
+		log.Printf("Color mismatch for task: %s", task.Description)
+		return true, "color", nil
+	}
+
+	// 5. Check for Time/Due Date Mismatch
+	existingTime, err := time.Parse(time.RFC3339, existingEvent.Start.DateTime)
 	if err != nil {
 		return false, "", err
 	}
 
-	if !eventTime.Equal(task.Deadline) {
-		log.Printf("task: %s, event: %s time needs update\n", task.Description, event.Summary)
+	targetTime, err := time.Parse(time.RFC3339, targetEvent.Start.DateTime)
+	if err != nil {
+		return false, "", err
+	}
+
+	if !existingTime.Equal(targetTime) {
+		log.Printf("Time mismatch: existing=%s, target=%s", existingTime, targetTime)
 		return true, NEEDS_UPDATE_DUE, nil
 	}
 
@@ -71,17 +90,28 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 	}
 
 	// 1. Title/Summary Logic
-	prefix := "‣"
+	prefix := ""
+	now := time.Now()
+
 	if task.Status == "completed" {
 		prefix = "✓"
+	} else if !task.Start.IsZero() {
+		// Started / Active
+		prefix = "‣"
+	} else if (!task.Deadline.IsZero() && task.Deadline.Before(now)) || (!task.Scheduled.IsZero() && task.Scheduled.Before(now)) {
+		// Overdue
+		prefix = "!"
 	}
-	// TODO: Check overdue for "!" prefix
-	eventSummary := fmt.Sprintf("%s %s", prefix, task.Description)
+
+	eventSummary := task.Description
+	if prefix != "" {
+		eventSummary = fmt.Sprintf("%s %s", prefix, task.Description)
+	}
 
 	// 2. Color Logic
 	// We need to instantiate ColorCache. Since this function is pure utility, we might need to pass cache or instantiate it here.
 	// Instantiating here for now as user requested refactor. Best practice would be dependency injection but let's keep it simple.
-	colorID := "14" // Default gray
+	colorID := "1" // Default lavender
 	cache, err := colors.NewColorCache()
 	if err == nil {
 		isActive := task.Status == "pending" || task.Status == "waiting" // broad definition
@@ -99,7 +129,8 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 	// Logic:
 	// If Done: End = Now (or task.End), Start = End - Estimate/Actual/Duration
 	// If Started: Start = Now (or task.Start), End = Start + Estimate
-	// Fallback: Start = Due, End = Due + Duration
+	// Fallback 1: Scheduled. Start = Scheduled, End = Scheduled + Estimate/Default
+	// Fallback 2: Due. Start = Due, End = Due + Duration
 
 	if task.Status == "completed" {
 		if !task.End.IsZero() {
@@ -123,8 +154,16 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 		} else {
 			end = start.Add(defaultDuration)
 		}
+	} else if !task.Scheduled.IsZero() {
+		// Scheduled
+		start = task.Scheduled
+		if task.Estimate > 0 {
+			end = start.Add(task.Estimate)
+		} else {
+			end = start.Add(defaultDuration)
+		}
 	} else if !task.Deadline.IsZero() {
-		// Scheduled / Due
+		// Due
 		start = task.Deadline
 		if task.Estimate > 0 {
 			end = start.Add(task.Estimate)
@@ -133,11 +172,7 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 		}
 	} else {
 		// ROI: If no dates, we can't sync it easily.
-		// User req said: "If no Start/End, ignore?"
-		// actually user said "task add Check if +READY". Ready usually implies sched/due or just unblocked.
-		// If no date, GCal requires one. Let's error or skip?
-		// Legacy behavior was error.
-		return nil, fmt.Errorf("task has no date usage (due, start, or end): %s", task.ID)
+		return nil, fmt.Errorf("task has no date usage (due, start, scheduled, or end): %s", task.ID)
 	}
 
 	// 4. Description & Accounting
@@ -153,7 +188,9 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 
 	// Taskwarrior-y formatting
 	descBuilder.WriteString(fmt.Sprintf("Status: %s\n", task.Status))
-	descBuilder.WriteString(fmt.Sprintf("Project: %s\n", task.Project))
+	if task.Project != "" {
+		descBuilder.WriteString(fmt.Sprintf("Project: %s\n", task.Project))
+	}
 	descBuilder.WriteString(fmt.Sprintf("UUID: %s\n", task.ID))
 
 	// Accounting Bullets
@@ -161,13 +198,39 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 	if task.Estimate > 0 {
 		descBuilder.WriteString(fmt.Sprintf("• estimated: %s\n", task.Estimate))
 	}
+
+	// Started late/early calculation
+	if !task.Start.IsZero() && !task.Scheduled.IsZero() {
+		diff := task.Start.Sub(task.Scheduled)
+		if diff > time.Minute {
+			descBuilder.WriteString(fmt.Sprintf("• started late by: %s\n", diff.Round(time.Minute)))
+		} else if diff < -time.Minute {
+			descBuilder.WriteString(fmt.Sprintf("• started early by: %s\n", (-diff).Round(time.Minute)))
+		}
+	}
+
 	if task.Status == "completed" {
-		// Simple logic: if actual vs estimate logic exists.
-		descBuilder.WriteString("• spent [calculation pending implementation]\n")
-		// TODO: Refine with actual calculation if Act is present
-	} else if !task.Start.IsZero() {
-		// "started late/early" logic requires Scheduled date vs Start date
-		descBuilder.WriteString("• started [check implementation]\n")
+		// Calculate actual time spent
+		var spent time.Duration
+		if task.Actual > 0 {
+			// Use UDA 'act' field if available
+			spent = task.Actual
+		} else if !task.Start.IsZero() && !task.End.IsZero() {
+			// Calculate from start/end timestamps
+			spent = task.End.Sub(task.Start)
+		}
+
+		if spent > 0 {
+			descBuilder.WriteString(fmt.Sprintf("• spent: %s\n", spent))
+			if task.Estimate > 0 {
+				diff := spent - task.Estimate
+				if diff > 0 {
+					descBuilder.WriteString(fmt.Sprintf("• over estimate by: %s\n", diff))
+				} else if diff < 0 {
+					descBuilder.WriteString(fmt.Sprintf("• under estimate by: %s\n", -diff))
+				}
+			}
+		}
 	}
 
 	// Annotations

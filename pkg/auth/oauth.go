@@ -63,7 +63,7 @@ func GetConfig(scopes []string) (*oauth2.Config, error) {
 		if parsedURL.Port() == "" { // If port is missing
 			parsedURL.Host = fmt.Sprintf("%s:%s", parsedURL.Hostname(), LocalhostAuthPort)
 			config.RedirectURL = parsedURL.String()
-			log.Printf("Corrected localhost RedirectURL to: %s", config.RedirectURL)
+			// log.Printf("Corrected localhost RedirectURL to: %s", config.RedirectURL)
 		} else if parsedURL.Port() != LocalhostAuthPort {
 			log.Printf("Warning: Mismatch in localhost redirect port. credentials.json has '%s', code expects '%s'. Using credentials.json's port.", parsedURL.Port(), LocalhostAuthPort)
 			// It's crucial here that the Google Cloud Console redirect URI matches the one used by net.Listen.

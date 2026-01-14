@@ -7,6 +7,7 @@ type Task struct {
 	ID          string
 	Description string
 	Deadline    time.Time
+	Scheduled   time.Time
 	Tags        []string
 	Priority    string
 	Status      string

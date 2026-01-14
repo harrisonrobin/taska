@@ -2,6 +2,7 @@ package colors
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,12 +20,17 @@ type ColorCache struct {
 	Projects map[string]*ProjectState `json:"projects"`
 }
 
+const (
+	xdgAppName = "taska"
+	cacheFile  = "project_colors.json"
+)
+
 func NewColorCache() (*ColorCache, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(home, ".task", "project_colors.json")
+	path := filepath.Join(home, ".config", xdgAppName, cacheFile)
 
 	cache := &ColorCache{
 		Path:     path,
@@ -49,8 +55,16 @@ func (c *ColorCache) Load() error {
 }
 
 func (c *ColorCache) Save() error {
+	// ensure directory exists
+	dir := filepath.Dir(c.Path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		log.Printf("Error creating color cache directory: %v", err)
+		return err
+	}
+
 	f, err := os.Create(c.Path)
 	if err != nil {
+		log.Printf("Error creating color cache file: %v", err)
 		return err
 	}
 	defer f.Close()
@@ -67,37 +81,19 @@ func (c *ColorCache) GetColorID(project string, isTaskActive bool) string {
 	state, exists := c.Projects[project]
 	if exists {
 		state.LastModified = time.Now()
-		if isTaskActive {
-			// We don't increment here strictly, we just know it's being used.
-			// Truly tracking "ActiveTasks" count accurately requires reading ALL tasks.
-			// The requirement says: "finds the project in the cache that has 0 pending tasks".
-			// Since we only see one task at a time in a hook, we can't maintain a perfect global count easily.
-			// STARTING STRATEGY:
-			// We will assume "ActiveTasks" is maintained externally or we simplify.
-			// Simplification: We track LastModified. "ActiveTasks" is hard in a hook-only CLI without state.
-			// Let's rely on LastModified and simply assign colors.
-			// BUT the requirement explicitly mentions "0 pending tasks".
-			// Let's approximate: If we are assigning for an Active task, we bump LastModified.
+		// Logic to update active tasks count omitted for simplicity in hook
+		if err := c.Save(); err != nil {
+			log.Printf("Warning: failed to save color cache: %v", err)
 		}
-		c.Save()
 		return state.ColorID
 	}
 
 	// New Project
-	// Available colors: 1-11
-	usedColors := make(map[string]bool)
-	for _, p := range c.Projects {
-		usedColors[p.ColorID] = true
-	}
-
 	return c.assignColor(project)
 }
 
 func (c *ColorCache) assignColor(project string) string {
-	// Colors 1 to 11 (Peacock to Tomato roughly in GCal UI, though IDs vary)
-	// GCal standard event colors are "1" to "11".
-
-	// Check used colors
+	// Colors 1 to 11 (Peacock to Tomato roughly)
 	used := make(map[string]bool)
 	for _, s := range c.Projects {
 		used[s.ColorID] = true
@@ -110,16 +106,16 @@ func (c *ColorCache) assignColor(project string) string {
 			c.Projects[project] = &ProjectState{
 				ColorID:      id,
 				LastModified: time.Now(),
-				ActiveTasks:  1, // Assume 1 for the calling task
+				ActiveTasks:  1,
 			}
-			c.Save()
+			if err := c.Save(); err != nil {
+				log.Printf("Warning: failed to save color cache: %v", err)
+			}
 			return id
 		}
 	}
 
-	// Cache is full -> Evict LRU
-	// Find project with oldest LastModified. User req said "0 active tasks", but we can't track that perfectly.
-	// We will use Oldest Modified as proxy for now.
+	// Cache is full -> Evict LRU (Oldest Modified)
 	var oldestProject string
 	var oldestTime time.Time
 	first := true
@@ -141,7 +137,9 @@ func (c *ColorCache) assignColor(project string) string {
 			LastModified: time.Now(),
 			ActiveTasks:  1,
 		}
-		c.Save()
+		if err := c.Save(); err != nil {
+			log.Printf("Warning: failed to save color cache: %v", err)
+		}
 		return recycledColor
 	}
 

@@ -35,7 +35,7 @@ func (c *CalendarClient) SyncEvent(task model.Task) (*calendar.Event, error) {
 	}
 
 	if existingEvent != nil {
-		needsUpdate, _, err := util.EventNeedsUpdate(&task, existingEvent)
+		needsUpdate, _, err := util.EventNeedsUpdate(&task, existingEvent, event)
 		if err != nil {
 			log.Printf("could not compare task with its calendar event: %v", err)
 			return nil, err
