@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/harrisonrobin/taska/pkg/auth"
+	"github.com/harrisonrobin/taska/pkg/config"
 	"github.com/harrisonrobin/taska/pkg/google"
 	"github.com/harrisonrobin/taska/pkg/model"
 	"github.com/harrisonrobin/taska/pkg/taskwarrior"
@@ -20,11 +21,32 @@ import (
 
 func main() {
 	// 1. Parse Flags
-	calendarName := flag.String("calendar", "Tasks", "Google Calendar name to sync with")
+	calendarName := flag.String("calendar", "", "Google Calendar name to sync with (overrides config)")
+	setCalendar := flag.String("set-calendar", "", "Set the default Google Calendar name")
 	doAuth := flag.Bool("auth", false, "Authenticate with Google Calendar")
 	flag.Parse()
 
-	// 2. Handle Authentication
+	// 2. Handle Set Calendar
+	if *setCalendar != "" {
+		cfg := &config.Config{Calendar: *setCalendar}
+		if err := config.Save(cfg); err != nil {
+			log.Fatalf("Error saving config: %v", err)
+		}
+		fmt.Printf("Default calendar set to: %s\n", *setCalendar)
+		return
+	}
+
+	// 3. Determine Calendar (Priority: Flag > Config > Default)
+	selectedCalendar := "Tasks" // Default fallback
+	cfg, err := config.Load()
+	if err == nil && cfg.Calendar != "" {
+		selectedCalendar = cfg.Calendar
+	}
+	if *calendarName != "" {
+		selectedCalendar = *calendarName
+	}
+
+	// 4. Handle Authentication
 	if *doAuth {
 		ctx := context.Background()
 		xdgConfigBase, err := auth.GetXdgHome()
@@ -53,7 +75,7 @@ func main() {
 		return
 	}
 
-	// 3. Handle Hook Logic (Stdin)
+	// 5. Handle Hook Logic (Stdin)
 	// Hook input: 1 line (on-add) or 2 lines (on-modify: old, new)
 	client := taskwarrior.NewClient()
 	twTasks, err := client.ParseTasks(os.Stdin)
@@ -141,7 +163,7 @@ func main() {
 	}
 
 	// Perform Action
-	gClient, err := google.NewClient(*calendarName)
+	gClient, err := google.NewClient(selectedCalendar)
 	if err != nil {
 		log.Fatalf("Error creating Google Calendar client: %v", err)
 	}

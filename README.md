@@ -10,6 +10,7 @@
     *   Deletes calendar events if a task is marked as `deleted` or moves to a `waiting` status.
     *   Updates existing events when task details (start time, completion status, etc.) change.
 *   **Authentication:** Simple OAuth2 authentication flow to securely connect to your Google account.
+*   **Persistent Configuration:** Set your preferred calendar once and it works everywhere.
 
 ## Prerequisites
 
@@ -45,7 +46,14 @@ go install github.com/harrisonrobin/taska@latest
     ```
     Follow the instructions to authorize the application.
 
-4.  **Taskwarrior Hook Setup:**
+4.  **Set Your Preferred Calendar (Optional):**
+    By default, `taska` syncs to a calendar named "Tasks". You can change this persistently:
+
+    ```bash
+    taska --set-calendar "Work"
+    ```
+
+5.  **Taskwarrior Hook Setup:**
     Link the binary to your Taskwarrior hooks directory.
 
     ```bash
@@ -58,7 +66,7 @@ go install github.com/harrisonrobin/taska@latest
 
 ## Usage
 
-Once installed as a hook, **taska** works automatically.
+Once installed as a hook, **taska** works automatically using the calendar you configured (or "Tasks" by default).
 
 *   **Add a Task:** `task add "Meeting with Client" due:tomorrow` -> Creates a calendar event.
 *   **Complete a Task:** `task 1 done` -> Updates/Removes event depending on logic.
@@ -74,7 +82,8 @@ task export | taska
 
 ### Options
 
-*   `--calendar "Calendar Name"`: Specify which Google Calendar to sync with (default: "Tasks").
+*   `--set-calendar "Calendar Name"`: Sets the default calendar for future runs.
+*   `--calendar "Calendar Name"`: Overrides the configured calendar for a *single* run.
 *   `--auth`: Trigger authentication flow.
 
 ## Contributing
