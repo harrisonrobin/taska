@@ -4,20 +4,19 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
-
-	"github.com/harrisonrobin/taska/pkg/model"
 )
 
 type Entry struct {
-	UUID      string    `json:"uuid"`
+	GCalID    string    `json:"gcal_id"`
+	Summary   string    `json:"summary"`
 	Scheduled time.Time `json:"scheduled"`
 }
 
 type Table struct {
-	Entries []Entry `json:"entries"`
-	Path    string  `json:"-"`
+	Entries map[string]Entry `json:"entries"`
+	Path    string           `json:"-"`
+	dirty   bool
 }
 
 func NewTable() (*Table, error) {
@@ -29,7 +28,7 @@ func NewTable() (*Table, error) {
 
 	t := &Table{
 		Path:    path,
-		Entries: []Entry{},
+		Entries: make(map[string]Entry),
 	}
 
 	if _, err := os.Stat(path); err == nil {
@@ -51,6 +50,9 @@ func (t *Table) Load() error {
 }
 
 func (t *Table) Save() error {
+	if !t.dirty {
+		return nil
+	}
 	dir := filepath.Dir(t.Path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -64,49 +66,47 @@ func (t *Table) Save() error {
 
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(t)
+	err = encoder.Encode(t)
+	if err == nil {
+		t.dirty = false
+	}
+	return err
 }
 
 // Update adds or updates a task in the table if it's pending and has a future scheduled date.
 // Otherwise, it removes it.
-func (t *Table) Update(task model.Task) {
-	// Remove if it exists first
-	t.Remove(task.ID)
-
-	// Add back only if relevant (pending and has future/current scheduled date)
-	// We check for !task.Scheduled.IsZero() and status == "pending"
-	if task.Status == "pending" && !task.Scheduled.IsZero() {
-		t.Entries = append(t.Entries, Entry{
-			UUID:      task.ID,
-			Scheduled: task.Scheduled,
-		})
-		sort.Slice(t.Entries, func(i, j int) bool {
-			return t.Entries[i].Scheduled.Before(t.Entries[j].Scheduled)
-		})
+func (t *Table) Update(uuid string, gcalID string, summary string, scheduled time.Time) {
+	if !scheduled.IsZero() {
+		old, exists := t.Entries[uuid]
+		if !exists || !old.Scheduled.Equal(scheduled) || old.GCalID != gcalID || old.Summary != summary {
+			t.Entries[uuid] = Entry{
+				GCalID:    gcalID,
+				Summary:   summary,
+				Scheduled: scheduled,
+			}
+			t.dirty = true
+		}
+	} else {
+		t.Remove(uuid)
 	}
 }
 
 func (t *Table) Remove(uuid string) {
-	for i, e := range t.Entries {
-		if e.UUID == uuid {
-			t.Entries = append(t.Entries[:i], t.Entries[i+1:]...)
-			return
-		}
+	if _, exists := t.Entries[uuid]; exists {
+		delete(t.Entries, uuid)
+		t.dirty = true
 	}
 }
 
-// Sweep returns UUIDs of tasks that have become overdue (Scheduled < now) and removes them.
-func (t *Table) Sweep(now time.Time) []string {
-	var swept []string
-	idx := 0
-	for idx < len(t.Entries) && t.Entries[idx].Scheduled.Before(now) {
-		swept = append(swept, t.Entries[idx].UUID)
-		idx++
+// Sweep returns entries that have become overdue (Scheduled < now) and removes them.
+func (t *Table) Sweep(now time.Time) []Entry {
+	var swept []Entry
+	for uuid, entry := range t.Entries {
+		if entry.Scheduled.Before(now) {
+			swept = append(swept, entry)
+			delete(t.Entries, uuid)
+			t.dirty = true
+		}
 	}
-
-	if idx > 0 {
-		t.Entries = t.Entries[idx:]
-	}
-
 	return swept
 }

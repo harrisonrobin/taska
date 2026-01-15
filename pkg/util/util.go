@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/harrisonrobin/taska/pkg/colors"
-	"github.com/harrisonrobin/taska/pkg/model"
+	"github.com/harrisonrobin/taska/pkg/taskwarrior"
 	"google.golang.org/api/calendar/v3"
 )
 
@@ -18,57 +19,110 @@ const (
 	NEEDS_UPDATE_DUE         = "due"
 )
 
-// EventNeedsUpdate returns true if the fields shared between a model.Task and a calendar.Event differ.
-// It compares the target event (newly converted) with the existing event from the calendar.
-func EventNeedsUpdate(task *model.Task, existingEvent *calendar.Event, targetEvent *calendar.Event) (bool, string, error) {
-	// Status derived from Summary prefix
-	existingIsCompleted := strings.HasPrefix(existingEvent.Summary, "✓")
-
-	// 1. Check for Status Mismatch
-	if task.Status == "completed" && !existingIsCompleted {
-		return true, NEEDS_UPDATE_STATUS, nil
-	}
-	if task.Status == "pending" && existingIsCompleted {
-		return true, NEEDS_UPDATE_STATUS, nil
+// ParseDuration parses ISO 8601 duration format (PT1H30M) from Taskwarrior JSON export
+func ParseDuration(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
 	}
 
-	// 2. Check for Summary/Title Mismatch (including Prefix changes like Overdue '!')
-	if existingEvent.Summary != targetEvent.Summary {
-		return true, NEEDS_UPDATE_DESCRIPTION, nil
+	// Parse ISO 8601 format (PT1H, PT30M, PT1H30M)
+	if len(s) < 2 || s[0] != 'P' {
+		return 0, fmt.Errorf("invalid ISO 8601 duration format: %s", s)
 	}
 
-	// 3. Check for Description (Annotations/Notes) Mismatch
-	if existingEvent.Description != targetEvent.Description {
-		return true, NEEDS_UPDATE_DESCRIPTION, nil
+	// Remove 'P' prefix and check for 'T' (time component)
+	s = s[1:]
+	if len(s) == 0 || s[0] != 'T' {
+		return 0, fmt.Errorf("invalid ISO 8601 duration (missing T): P%s", s)
+	}
+	s = s[1:] // Remove 'T'
+
+	var total time.Duration
+	re := regexp.MustCompile(`(\d+)([HMS])`)
+	matches := re.FindAllStringSubmatch(s, -1)
+
+	for _, match := range matches {
+		value, _ := strconv.Atoi(match[1])
+		unit := match[2]
+
+		switch unit {
+		case "H":
+			total += time.Duration(value) * time.Hour
+		case "M":
+			total += time.Duration(value) * time.Minute
+		case "S":
+			total += time.Duration(value) * time.Second
+		}
 	}
 
-	// 4. Check for Color Mismatch
-	if existingEvent.ColorId != targetEvent.ColorId {
-		return true, "color", nil
+	if total == 0 {
+		return 0, fmt.Errorf("invalid ISO 8601 duration: PT%s", s)
 	}
 
-	// 5. Check for Time/Due Date Mismatch
-	existingTime, err := time.Parse(time.RFC3339, existingEvent.Start.DateTime)
-	if err != nil {
-		return false, "", err
-	}
-
-	targetTime, err := time.Parse(time.RFC3339, targetEvent.Start.DateTime)
-	if err != nil {
-		return false, "", err
-	}
-
-	if !existingTime.Equal(targetTime) {
-		return true, NEEDS_UPDATE_DUE, nil
-	}
-
-	return false, "", nil
+	return total, nil
 }
 
-func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
+// EventNeedsUpdate returns a patch event if the fields shared between a taskwarrior.Task and a calendar.Event differ.
+// It compares the target event (newly converted) with the existing event from the calendar.
+func EventNeedsUpdate(task *taskwarrior.Task, existingEvent *calendar.Event, targetEvent *calendar.Event) (*calendar.Event, error) {
+	patch := &calendar.Event{}
+	needsUpdate := false
+
+	// 1. Check for Summary/Title Mismatch
+	if existingEvent.Summary != targetEvent.Summary {
+		patch.Summary = targetEvent.Summary
+		needsUpdate = true
+	}
+
+	// 2. Check for Description (Annotations/Notes) Mismatch
+	if existingEvent.Description != targetEvent.Description {
+		patch.Description = targetEvent.Description
+		needsUpdate = true
+	}
+
+	// 3. Check for Color Mismatch
+	if existingEvent.ColorId != targetEvent.ColorId {
+		patch.ColorId = targetEvent.ColorId
+		needsUpdate = true
+	}
+
+	// 4. Check for Time/Due Date Mismatch
+	existingStartTime, err := time.Parse(time.RFC3339, existingEvent.Start.DateTime)
+	if err != nil {
+		return nil, err
+	}
+	targetStartTime, err := time.Parse(time.RFC3339, targetEvent.Start.DateTime)
+	if err != nil {
+		return nil, err
+	}
+	existingEndTime, err := time.Parse(time.RFC3339, existingEvent.End.DateTime)
+	if err != nil {
+		return nil, err
+	}
+	targetEndTime, err := time.Parse(time.RFC3339, targetEvent.End.DateTime)
+	if err != nil {
+		return nil, err
+	}
+
+	if !existingStartTime.Equal(targetStartTime) || !existingEndTime.Equal(targetEndTime) {
+		patch.Start = targetEvent.Start
+		patch.End = targetEvent.End
+		needsUpdate = true
+	}
+
+	if needsUpdate {
+		return patch, nil
+	}
+	return nil, nil
+}
+
+func ConvertTaskToCalendarEvent(task *taskwarrior.Task) (*calendar.Event, error) {
 	if task == nil {
 		return nil, fmt.Errorf("could not convert nil Task")
 	}
+
+	est, _ := ParseDuration(task.Est)
+	act, _ := ParseDuration(task.Act)
 
 	// 1. Title/Summary Logic
 	prefix := ""
@@ -76,10 +130,10 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 
 	if task.Status == "completed" {
 		prefix = "✓"
-	} else if !task.Start.IsZero() {
+	} else if task.Start != nil && !task.Start.IsZero() {
 		// Started / Active
 		prefix = "‣"
-	} else if (!task.Deadline.IsZero() && task.Deadline.Before(now)) || (!task.Scheduled.IsZero() && task.Scheduled.Before(now)) {
+	} else if (task.Due != nil && !task.Due.IsZero() && task.Due.Before(now)) || (task.Scheduled != nil && !task.Scheduled.IsZero() && task.Scheduled.Before(now)) {
 		// Overdue
 		prefix = "!"
 	}
@@ -114,46 +168,46 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 	// Fallback 2: Due. Start = Due, End = Due + Duration
 
 	if task.Status == "completed" {
-		if !task.End.IsZero() {
-			end = task.End
+		if task.End != nil && !task.End.IsZero() {
+			end = task.End.Time
 		} else {
 			end = time.Now()
 		}
 
 		duration := defaultDuration
-		if task.Actual > 0 {
-			duration = task.Actual
-		} else if task.Estimate > 0 {
-			duration = task.Estimate
+		if act > 0 {
+			duration = act
+		} else if est > 0 {
+			duration = est
 		}
 		start = end.Add(-duration)
-	} else if !task.Start.IsZero() {
+	} else if task.Start != nil && !task.Start.IsZero() {
 		// Started
-		start = task.Start
-		if task.Estimate > 0 {
-			end = start.Add(task.Estimate)
+		start = task.Start.Time
+		if est > 0 {
+			end = start.Add(est)
 		} else {
 			end = start.Add(defaultDuration)
 		}
-	} else if !task.Scheduled.IsZero() {
+	} else if task.Scheduled != nil && !task.Scheduled.IsZero() {
 		// Scheduled
-		start = task.Scheduled
-		if task.Estimate > 0 {
-			end = start.Add(task.Estimate)
+		start = task.Scheduled.Time
+		if est > 0 {
+			end = start.Add(est)
 		} else {
 			end = start.Add(defaultDuration)
 		}
-	} else if !task.Deadline.IsZero() {
+	} else if task.Due != nil && !task.Due.IsZero() {
 		// Due
-		start = task.Deadline
-		if task.Estimate > 0 {
-			end = start.Add(task.Estimate)
+		start = task.Due.Time
+		if est > 0 {
+			end = start.Add(est)
 		} else {
 			end = start.Add(defaultDuration)
 		}
 	} else {
 		// ROI: If no dates, we can't sync it easily.
-		return nil, fmt.Errorf("task has no date usage (due, start, scheduled, or end): %s", task.ID)
+		return nil, fmt.Errorf("task has no date usage (due, start, scheduled, or end): %s", task.UUID)
 	}
 
 	// 4. Description & Accounting
@@ -172,17 +226,17 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 	if task.Project != "" {
 		descBuilder.WriteString(fmt.Sprintf("Project: %s\n", task.Project))
 	}
-	descBuilder.WriteString(fmt.Sprintf("UUID: %s\n", task.ID))
+	descBuilder.WriteString(fmt.Sprintf("UUID: %s\n", task.UUID))
 
 	// Accounting Bullets
 	descBuilder.WriteString("\nAccounting:\n")
-	if task.Estimate > 0 {
-		descBuilder.WriteString(fmt.Sprintf("• estimated: %s\n", task.Estimate))
+	if est > 0 {
+		descBuilder.WriteString(fmt.Sprintf("• estimated: %s\n", est))
 	}
 
 	// Started late/early calculation
-	if !task.Start.IsZero() && !task.Scheduled.IsZero() {
-		diff := task.Start.Sub(task.Scheduled)
+	if task.Start != nil && !task.Start.IsZero() && task.Scheduled != nil && !task.Scheduled.IsZero() {
+		diff := task.Start.Sub(task.Scheduled.Time)
 		if diff > time.Minute {
 			descBuilder.WriteString(fmt.Sprintf("• started late by: %s\n", diff.Round(time.Minute)))
 		} else if diff < -time.Minute {
@@ -193,18 +247,18 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 	if task.Status == "completed" {
 		// Calculate actual time spent
 		var spent time.Duration
-		if task.Actual > 0 {
+		if act > 0 {
 			// Use UDA 'act' field if available
-			spent = task.Actual
-		} else if !task.Start.IsZero() && !task.End.IsZero() {
+			spent = act
+		} else if task.Start != nil && !task.Start.IsZero() && task.End != nil && !task.End.IsZero() {
 			// Calculate from start/end timestamps
-			spent = task.End.Sub(task.Start)
+			spent = task.End.Sub(task.Start.Time)
 		}
 
 		if spent > 0 {
 			descBuilder.WriteString(fmt.Sprintf("• spent: %s\n", spent))
-			if task.Estimate > 0 {
-				diff := spent - task.Estimate
+			if est > 0 {
+				diff := spent - est
 				if diff > 0 {
 					descBuilder.WriteString(fmt.Sprintf("• over estimate by: %s\n", diff))
 				} else if diff < 0 {
@@ -218,7 +272,7 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 	if len(task.Annotations) > 0 {
 		descBuilder.WriteString("\nNotes:\n")
 		for _, ann := range task.Annotations {
-			descBuilder.WriteString(fmt.Sprintf("‣ %s\n", ann))
+			descBuilder.WriteString(fmt.Sprintf("‣ %s\n", ann.Description))
 		}
 	}
 
@@ -234,7 +288,7 @@ func ConvertTaskToCalendarEvent(task *model.Task) (*calendar.Event, error) {
 		Description: descBuilder.String(),
 		ExtendedProperties: &calendar.EventExtendedProperties{
 			Private: map[string]string{
-				"taskwarrior_id": task.ID,
+				"taskwarrior_id": task.UUID,
 			},
 		},
 	}

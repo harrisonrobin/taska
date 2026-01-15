@@ -18,6 +18,7 @@ type ProjectState struct {
 type ColorCache struct {
 	Path     string
 	Projects map[string]*ProjectState `json:"projects"`
+	dirty    bool
 }
 
 const (
@@ -55,6 +56,9 @@ func (c *ColorCache) Load() error {
 }
 
 func (c *ColorCache) Save() error {
+	if !c.dirty {
+		return nil
+	}
 	// ensure directory exists
 	dir := filepath.Dir(c.Path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -68,7 +72,11 @@ func (c *ColorCache) Save() error {
 		return err
 	}
 	defer f.Close()
-	return json.NewEncoder(f).Encode(c.Projects)
+	err = json.NewEncoder(f).Encode(c.Projects)
+	if err == nil {
+		c.dirty = false
+	}
+	return err
 }
 
 // GetColorID returns the color ID for a project, managing LRU logic.
@@ -80,11 +88,11 @@ func (c *ColorCache) GetColorID(project string, isTaskActive bool) string {
 
 	state, exists := c.Projects[project]
 	if exists {
+		// Just updating LastModified doesn't necessarily need a sync Save
+		// unless we are VERY concerned about perfect LRU on crash.
+		// For performance, we'll mark dirty but NOT call Save() here.
 		state.LastModified = time.Now()
-		// Logic to update active tasks count omitted for simplicity in hook
-		if err := c.Save(); err != nil {
-			log.Printf("Warning: failed to save color cache: %v", err)
-		}
+		c.dirty = true
 		return state.ColorID
 	}
 
@@ -108,9 +116,7 @@ func (c *ColorCache) assignColor(project string) string {
 				LastModified: time.Now(),
 				ActiveTasks:  1,
 			}
-			if err := c.Save(); err != nil {
-				log.Printf("Warning: failed to save color cache: %v", err)
-			}
+			c.dirty = true
 			return id
 		}
 	}
@@ -137,9 +143,7 @@ func (c *ColorCache) assignColor(project string) string {
 			LastModified: time.Now(),
 			ActiveTasks:  1,
 		}
-		if err := c.Save(); err != nil {
-			log.Printf("Warning: failed to save color cache: %v", err)
-		}
+		c.dirty = true
 		return recycledColor
 	}
 

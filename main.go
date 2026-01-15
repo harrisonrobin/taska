@@ -7,67 +7,25 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/harrisonrobin/taska/pkg/auth"
 	"github.com/harrisonrobin/taska/pkg/config"
 	"github.com/harrisonrobin/taska/pkg/google"
-	"github.com/harrisonrobin/taska/pkg/model"
+	"github.com/harrisonrobin/taska/pkg/index"
 	"github.com/harrisonrobin/taska/pkg/overdue"
 	"github.com/harrisonrobin/taska/pkg/taskwarrior"
+	"google.golang.org/api/calendar/v3"
 )
-
-// parseDuration parses ISO 8601 duration format (PT1H30M) from Taskwarrior JSON export
-func parseDuration(s string) (time.Duration, error) {
-	if s == "" {
-		return 0, nil
-	}
-
-	// Parse ISO 8601 format (PT1H, PT30M, PT1H30M)
-	if len(s) < 2 || s[0] != 'P' {
-		return 0, fmt.Errorf("invalid ISO 8601 duration format: %s", s)
-	}
-
-	// Remove 'P' prefix and check for 'T' (time component)
-	s = s[1:]
-	if len(s) == 0 || s[0] != 'T' {
-		return 0, fmt.Errorf("invalid ISO 8601 duration (missing T): P%s", s)
-	}
-	s = s[1:] // Remove 'T'
-
-	var total time.Duration
-	re := regexp.MustCompile(`(\d+)([HMS])`)
-	matches := re.FindAllStringSubmatch(s, -1)
-
-	for _, match := range matches {
-		value, _ := strconv.Atoi(match[1])
-		unit := match[2]
-
-		switch unit {
-		case "H":
-			total += time.Duration(value) * time.Hour
-		case "M":
-			total += time.Duration(value) * time.Minute
-		case "S":
-			total += time.Duration(value) * time.Second
-		}
-	}
-
-	if total == 0 {
-		return 0, fmt.Errorf("invalid ISO 8601 duration: PT%s", s)
-	}
-
-	return total, nil
-}
 
 func main() {
 	// 1. Parse Flags
 	calendarName := flag.String("calendar", "", "Google Calendar name to sync with (overrides config)")
 	setCalendar := flag.String("set-calendar", "", "Set the default Google Calendar name")
 	doAuth := flag.Bool("auth", false, "Authenticate with Google Calendar")
+	background := flag.Bool("background", false, "Internal use: run in background mode")
 	flag.Parse()
 
 	// 2. Handle Set Calendar
@@ -119,21 +77,17 @@ func main() {
 		return
 	}
 
-	// 5. Initialize Overdue Sweep Table
-	sweepTable, err := overdue.NewTable()
-	if err != nil {
-		log.Printf("Warning: failed to initialize overdue sweep table: %v", err)
-	}
-
-	// 6. Handle Hook Logic (Stdin)
+	// 5. Handle Foreground vs Background Mode
 	client := taskwarrior.NewClient()
-	twTasks, err := client.ParseTasks(os.Stdin)
-	if err != nil {
-		log.Fatalf("Error parsing tasks from stdin: %v", err)
-	}
 
-	// PROTOCOL: We MUST output the input tasks back to stdout at the end.
-	defer func() {
+	if !*background {
+		// FOREGROUND: Read tasks, print to stdout, spawn background, exit.
+		twTasks, err := client.ParseTasks(os.Stdin)
+		if err != nil {
+			log.Fatalf("Error parsing tasks from stdin: %v", err)
+		}
+
+		// Protocol: Output result JSON
 		if len(twTasks) > 0 {
 			taskToOutput := twTasks[len(twTasks)-1]
 			if err := json.NewEncoder(os.Stdout).Encode(taskToOutput); err != nil {
@@ -141,112 +95,100 @@ func main() {
 			}
 		}
 
-		if sweepTable != nil {
-			if err := sweepTable.Save(); err != nil {
-				log.Printf("Warning: failed to save sweep table: %v", err)
-			}
+		if len(twTasks) == 0 {
+			return
 		}
-	}()
 
-	// 7. Initialize Google Calendar Client
-	gClient, err := google.NewClient(selectedCalendar)
+		// Spawn background process
+		self, err := os.Executable()
+		if err != nil {
+			log.Fatalf("could not find self: %v", err)
+		}
+		args := []string{"--background", "--calendar", selectedCalendar}
+		cmd := exec.Command(self, args...)
+		cmd.Stdout = nil // Silence in background
+		cmd.Stderr = nil // Silence in background
+
+		// Encode tasks to pass via pipe
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			log.Fatalf("could not open stdin pipe: %v", err)
+		}
+		if err := cmd.Start(); err != nil {
+			log.Fatalf("could not start background process: %v", err)
+		}
+
+		json.NewEncoder(stdin).Encode(twTasks)
+		stdin.Close()
+
+		// Detach and exit
+		return
+	}
+
+	// BACKGROUND: Performance heavy lifting
+	twTasks, err := client.ParseTasks(os.Stdin)
+	if err != nil {
+		log.Fatalf("Background: error parsing tasks: %v", err)
+	}
+
+	sweepTable, err := overdue.NewTable()
+	if err != nil {
+		log.Printf("Warning: failed to initialize overdue sweep table: %v", err)
+	}
+
+	evtIndex, err := index.NewEventIndex()
+	if err != nil {
+		log.Printf("Warning: failed to initialize event index: %v", err)
+	}
+
+	gClient, err := google.NewClient(selectedCalendar, evtIndex)
 	if err != nil {
 		log.Printf("Error creating Google Calendar client: %v", err)
 		return
 	}
 
-	// Helper to convert TW task to Model task
-	toModel := func(twT taskwarrior.Task) *model.Task {
-		var deadline time.Time
-		if twT.Due != nil {
-			deadline = twT.Due.Time
-		}
-		var scheduled time.Time
-		if twT.Scheduled != nil {
-			scheduled = twT.Scheduled.Time
-		}
-		var start, end time.Time
-		if twT.Start != nil {
-			start = twT.Start.Time
-		}
-		if twT.End != nil {
-			end = twT.End.Time
-		}
-		est, _ := parseDuration(twT.Est)
-		act, _ := parseDuration(twT.Act)
-
-		t := &model.Task{
-			ID:          twT.UUID,
-			Description: twT.Description,
-			Deadline:    deadline,
-			Scheduled:   scheduled,
-			Status:      twT.Status,
-			Project:     twT.Project,
-			Tags:        twT.Tags,
-			Start:       start,
-			End:         end,
-			Estimate:    est,
-			Actual:      act,
-		}
-
-		if len(twT.Annotations) > 0 {
-			for _, a := range twT.Annotations {
-				t.Annotations = append(t.Annotations, a.Description)
-			}
-		}
-		return t
-	}
-
-	// 8. Run Overdue Sweep
+	// Run Overdue Sweep
 	if sweepTable != nil {
-		sweptUUIDs := sweepTable.Sweep(time.Now())
-		for _, uuid := range sweptUUIDs {
-			tasks, err := client.GetTasks([]string{uuid})
-			if err != nil || len(tasks) == 0 {
-				// It was already removed from the memory table by Sweep(),
-				// and it will be saved to disk by the deferred save.
-				continue
+		overdueEntries := sweepTable.Sweep(time.Now())
+		for _, e := range overdueEntries {
+			patch := &calendar.Event{
+				Summary: "! " + e.Summary,
 			}
-			mt := toModel(tasks[0])
-			if _, err := gClient.SyncEvent(*mt); err != nil {
-				log.Printf("Sweep: error syncing task %s: %v", uuid, err)
+			if _, err := gClient.PatchEvent(e.GCalID, patch); err != nil {
+				log.Printf("Sweep: error patching event %s: %v", e.GCalID, err)
 			}
+		}
+		// Save table after sweep
+		if err := sweepTable.Save(); err != nil {
+			log.Printf("Warning: failed to save sweep table: %v", err)
 		}
 	}
 
+	// Process Hook Tasks
 	if len(twTasks) == 0 {
 		return
 	}
 
-	// 9. Process Hook Tasks
-	var taskToSync *model.Task
+	var taskToSync *taskwarrior.Task
 	action := "sync" // default
 
 	if len(twTasks) == 1 {
-		// on-add (or manual single pipe)
-		newTask := twTasks[0]
-		taskToSync = toModel(newTask)
-
+		taskToSync = &twTasks[0]
 	} else if len(twTasks) >= 2 {
-		// on-modify: [0]=old, [1]=new
-		newT := twTasks[1]
-		taskToSync = toModel(newT)
+		newT := &twTasks[1]
+		taskToSync = newT
 
 		isBlockedOrWaiting := false
 		if newT.Status == "waiting" {
 			isBlockedOrWaiting = true
 		}
-		// Check for BLOCKED tag
 		for _, tag := range newT.Tags {
 			if tag == "BLOCKED" {
 				isBlockedOrWaiting = true
 				break
 			}
 		}
-
-		if isBlockedOrWaiting {
-			action = "delete"
-		} else if newT.Status == "deleted" {
+		if isBlockedOrWaiting || newT.Status == "deleted" {
 			action = "delete"
 		}
 	}
@@ -256,28 +198,30 @@ func main() {
 	}
 
 	if action == "delete" {
-		// Find and delete
-		event, err := gClient.GetEventByTaskID(taskToSync.ID)
-		if err != nil {
-			log.Printf("Error finding event to delete: %v", err)
-			return
-		}
-		if event != nil {
-			err := gClient.DeleteEvent(event.Id)
-			if err != nil {
+		event, err := gClient.GetEventByTaskID(taskToSync.UUID)
+		if err == nil && event != nil {
+			if err := gClient.DeleteEvent(event.Id); err != nil {
 				log.Printf("Error deleting event: %v", err)
 			}
 		}
 		if sweepTable != nil {
-			sweepTable.Remove(taskToSync.ID)
+			sweepTable.Remove(taskToSync.UUID)
+			sweepTable.Save()
+		}
+		if evtIndex != nil {
+			evtIndex.Remove(taskToSync.UUID)
+			evtIndex.Save()
 		}
 	} else {
-		// Insert / Patch
-		_, err := gClient.SyncEvent(*taskToSync)
+		event, err := gClient.SyncEvent(*taskToSync)
 		if err != nil {
-			log.Printf("Error syncing event for task %s: %v\n", taskToSync.Description, err)
-		} else if sweepTable != nil {
-			sweepTable.Update(*taskToSync)
+			log.Printf("Error syncing event: %v\n", err)
+		} else if sweepTable != nil && taskToSync.Status == "pending" && taskToSync.Scheduled != nil {
+			sweepTable.Update(taskToSync.UUID, event.Id, taskToSync.Description, taskToSync.Scheduled.Time)
+			sweepTable.Save()
+		}
+		if evtIndex != nil {
+			evtIndex.Save() // Save new mappings
 		}
 	}
 }

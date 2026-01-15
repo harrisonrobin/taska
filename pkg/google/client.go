@@ -5,12 +5,13 @@ import (
 	"fmt"
 
 	"github.com/harrisonrobin/taska/pkg/auth"
+	"github.com/harrisonrobin/taska/pkg/index"
 	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/option"
 )
 
 // NewClient creates a new Google Calendar client.
-func NewClient(calendarName string) (*CalendarClient, error) {
+func NewClient(calendarName string, idx *index.EventIndex) (*CalendarClient, error) {
 	ctx := context.Background()
 	scopes := []string{
 		calendar.CalendarEventsScope,
@@ -43,5 +44,5 @@ func NewClient(calendarName string) (*CalendarClient, error) {
 		return nil, fmt.Errorf("calendar '%s' not found", calendarName)
 	}
 
-	return NewCalendarClient(srv, calendarID), nil
+	return NewCalendarClient(srv, calendarID, idx), nil
 }

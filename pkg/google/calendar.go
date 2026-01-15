@@ -5,7 +5,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/harrisonrobin/taska/pkg/model"
+	"github.com/harrisonrobin/taska/pkg/index"
+	"github.com/harrisonrobin/taska/pkg/taskwarrior"
 	"github.com/harrisonrobin/taska/pkg/util"
 	"google.golang.org/api/calendar/v3"
 )
@@ -14,40 +15,69 @@ import (
 type CalendarClient struct {
 	srv        *calendar.Service
 	calendarID string
+	index      *index.EventIndex
 }
 
 // NewCalendarClient creates a new Google Calendar client.
-func NewCalendarClient(srv *calendar.Service, calendarID string) *CalendarClient {
-	return &CalendarClient{srv: srv, calendarID: calendarID}
+func NewCalendarClient(srv *calendar.Service, calendarID string, idx *index.EventIndex) *CalendarClient {
+	return &CalendarClient{srv: srv, calendarID: calendarID, index: idx}
 }
 
 // SyncEvent creates a new event or updates an existing one.
-func (c *CalendarClient) SyncEvent(task model.Task) (*calendar.Event, error) {
+func (c *CalendarClient) SyncEvent(task taskwarrior.Task) (*calendar.Event, error) {
 	event, err := util.ConvertTaskToCalendarEvent(&task)
 	if err != nil {
 		return nil, err
 	}
 
-	// Search for existing event by Extended Property
-	existingEvent, err := c.GetEventByTaskID(task.ID)
-	if err != nil {
-		return nil, fmt.Errorf("error searching for event: %w", err)
+	var existingEvent *calendar.Event
+	// 1. Try local index first
+	if c.index != nil {
+		eventID := c.index.Get(task.UUID)
+		if eventID != "" {
+			existingEvent, err = c.srv.Events.Get(c.calendarID, eventID).Do()
+			if err != nil {
+				// If not found or error, fallback to search
+				existingEvent = nil
+			}
+		}
+	}
+
+	// 2. Fallback to API search if not found in index or index failed
+	if existingEvent == nil {
+		existingEvent, err = c.GetEventByTaskID(task.UUID)
+		if err != nil {
+			return nil, fmt.Errorf("error searching for event: %w", err)
+		}
 	}
 
 	if existingEvent != nil {
-		needsUpdate, _, err := util.EventNeedsUpdate(&task, existingEvent, event)
+		patch, err := util.EventNeedsUpdate(&task, existingEvent, event)
 		if err != nil {
 			log.Printf("could not compare task with its calendar event: %v", err)
 			return nil, err
 		}
-		if needsUpdate {
-			// Ensure we preserve the ID when updating
-			return c.srv.Events.Update(c.calendarID, existingEvent.Id, event).Do()
+		if patch != nil {
+			// Surgical Patch
+			updatedEvent, err := c.PatchEvent(existingEvent.Id, patch)
+			if err == nil && c.index != nil {
+				c.index.Set(task.UUID, updatedEvent.Id)
+			}
+			return updatedEvent, err
 		}
 		return existingEvent, nil
 	}
 
-	return c.srv.Events.Insert(c.calendarID, event).Do()
+	createdEvent, err := c.srv.Events.Insert(c.calendarID, event).Do()
+	if err == nil && c.index != nil {
+		c.index.Set(task.UUID, createdEvent.Id)
+	}
+	return createdEvent, err
+}
+
+// PatchEvent performs a partial update on an event.
+func (c *CalendarClient) PatchEvent(eventID string, patch *calendar.Event) (*calendar.Event, error) {
+	return c.srv.Events.Patch(c.calendarID, eventID, patch).Do()
 }
 
 // DeleteEvent deletes an event from the calendar.
